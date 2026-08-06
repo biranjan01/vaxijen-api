@@ -254,7 +254,6 @@ def allertop_predict(req: SeqRequest):
         return _dummy_allertop(req.sequences)
 
     _log(f"AllerTOP: {len(req.sequences)} peptides")
-    results = []
 
     sbm, sb, cookies, user_agent = _sb_launch_cloudflare(ALLERTOP_URL)
 
@@ -289,68 +288,46 @@ def allertop_predict(req: SeqRequest):
         except Exception as e:
             _log(f"  Login failed: {e}")
 
-        # Navigate to AllerTOP
-        sb.open(ALLERTOP_URL)
-        time.sleep(3)
+        # Get updated cookies from browser
+        cookies = {c["name"]: c["value"] for c in sb.get_cookies()}
+        user_agent = sb.execute_script("return navigator.userAgent")
 
-        # Submit each peptide
-        for seq in req.sequences:
-            _log(f"  Submitting: {seq}")
-            try:
-                sb.open(ALLERTOP_URL)
-                time.sleep(3)
-                ta = None
-                try:
-                    ta = sb.find_element("textarea[name='protein']")
-                except Exception:
-                    try:
-                        ta = sb.find_element("textarea")
-                    except Exception:
-                        pass
-                if not ta:
-                    results.append(StepResult(sequence=seq, prediction="Unknown", error="No textarea"))
-                    continue
-
-                sb.execute_script("document.querySelector('textarea').value = ''")
-                sb.type("textarea", seq)
-                time.sleep(1)
-                sb.click("button[type='submit']")
-                time.sleep(10)
-
-                # Wait for classification
-                html = sb.get_page_source()
-                text = _strip_html(html)
-                for i in range(15):
-                    if "Classification" in text and ("ALLERGEN" in text or "NON-ALLERGEN" in text):
-                        break
-                    time.sleep(3)
-                    html = sb.get_page_source()
-                    text = _strip_html(html)
-
-                pat = re.compile(r"Classification.*?:\s*(Probable\s+(?:NON-)?ALLERGEN)", re.DOTALL | re.IGNORECASE)
-                m = pat.search(text)
-
-                sim_pat = re.compile(r"Most similar protein:\s*(.+?)(?:\n|Classification)", re.DOTALL | re.IGNORECASE)
-                sim_m = sim_pat.search(text)
-                similar_protein = re.sub(r"\s+", " ", sim_m.group(1).strip()) if sim_m else None
-
-                if m:
-                    pred = m.group(1).strip().upper()
-                    if "NON-ALLERGEN" in pred:
-                        results.append(StepResult(sequence=seq, prediction="NON-ALLERGEN", similar_protein=similar_protein))
-                    else:
-                        results.append(StepResult(sequence=seq, prediction="ALLERGEN", similar_protein=similar_protein))
-                    _log(f"  {seq} → {pred}")
-                else:
-                    results.append(StepResult(sequence=seq, prediction="Unknown", similar_protein=similar_protein))
-
-            except Exception as e:
-                _log(f"  {seq} → Error: {e}")
-                results.append(StepResult(sequence=seq, prediction="Unknown", error=str(e)))
+        # httpx batch
+        results = _allertop_httpx_batch(req.sequences, cookies, user_agent)
     finally:
         sbm.__exit__(None, None, None)
         _cleanup()
 
+    return results
+
+
+def _allertop_httpx_batch(sequences, cookies, user_agent):
+    results = []
+    client = _sb_get_httpx_client(cookies, user_agent, referer=ALLERTOP_URL)
+    for seq in sequences:
+        try:
+            resp = client.post(ALLERTOP_URL, data={"protein": seq})
+            text = _strip_html(resp.text)
+            if "Cloudflare" in resp.text or "Just a moment" in resp.text:
+                results.append(StepResult(sequence=seq, prediction="Unknown", error="Cloudflare blocked"))
+                continue
+            pat = re.compile(r"Classification.*?:\s*(Probable\s+(?:NON-)?ALLERGEN)", re.DOTALL | re.IGNORECASE)
+            m = pat.search(text)
+            sim_pat = re.compile(r"Most similar protein:\s*(.+?)(?:\n|Classification)", re.DOTALL | re.IGNORECASE)
+            sim_m = sim_pat.search(text)
+            similar_protein = re.sub(r"\s+", " ", sim_m.group(1).strip()) if sim_m else None
+            if m:
+                pred = m.group(1).strip()
+                if "NON-ALLERGEN" in pred.upper():
+                    results.append(StepResult(sequence=seq, prediction="NON-ALLERGEN", similar_protein=similar_protein))
+                else:
+                    results.append(StepResult(sequence=seq, prediction="ALLERGEN", similar_protein=similar_protein))
+            else:
+                results.append(StepResult(sequence=seq, prediction="Unknown", similar_protein=similar_protein))
+        except Exception as e:
+            results.append(StepResult(sequence=seq, prediction="Unknown", error=str(e)))
+        time.sleep(1)
+    client.close()
     return results
 
 
@@ -488,43 +465,31 @@ def toxinpred_predict(req: SeqRequest):
         return _dummy_toxinpred(req.sequences)
 
     _log(f"ToxinPred: {len(req.sequences)} peptides")
-    results = []
 
     sbm, sb, cookies, user_agent = _sb_launch_cloudflare(TOXINPRED_URL)
 
     try:
-        fasta = "\n".join(f">seq{i}\n{s}" for i, s in enumerate(req.sequences))
+        cookies = {c["name"]: c["value"] for c in sb.get_cookies()}
+        user_agent = sb.execute_script("return navigator.userAgent")
 
-        for attempt in range(3):
-            try:
-                sb.wait_for_element("textarea", timeout=5)
-                break
-            except Exception:
-                time.sleep(3)
+        results = _toxinpred_httpx_batch(req.sequences, cookies, user_agent)
+    finally:
+        sbm.__exit__(None, None, None)
+        _cleanup()
 
-        sb.type("textarea", fasta)
+    return results
 
-        # Select Hybrid method
-        selects = sb.find_elements("select")
-        for sel in selects:
-            try:
-                opts = sel.find_elements("option")
-                for opt in opts:
-                    txt = (opt.text or "").lower()
-                    if "hybrid" in txt:
-                        sel.click()
-                        opt.click()
-                        break
-            except Exception:
-                pass
 
-        sb.click("input[type='submit']")
-        time.sleep(10)
-
-        html = sb.get_page_source()
-        text = _strip_html(html)
-
-        for seq in req.sequences:
+def _toxinpred_httpx_batch(sequences, cookies, user_agent):
+    results = []
+    client = _sb_get_httpx_client(cookies, user_agent, referer=TOXINPRED_URL)
+    fasta = "\n".join(f">seq{i}\n{s}" for i, s in enumerate(sequences))
+    try:
+        resp = client.post(TOXINPRED_URL, data={"fasta": fasta, "method": "hybrid", "submit": "Submit"})
+        text = _strip_html(resp.text)
+        if "Cloudflare" in resp.text or "Just a moment" in resp.text:
+            return [StepResult(sequence=s, prediction="Unknown", error="Cloudflare blocked") for s in sequences]
+        for seq in sequences:
             if seq in text:
                 idx = text.index(seq)
                 nearby = text[idx:idx+300]
@@ -535,11 +500,10 @@ def toxinpred_predict(req: SeqRequest):
                 else:
                     results.append(StepResult(sequence=seq, prediction="Unknown"))
             else:
-                results.append(StepResult(sequence=seq, error="not found"))
-    finally:
-        sbm.__exit__(None, None, None)
-        _cleanup()
-
+                results.append(StepResult(sequence=seq, prediction="Unknown"))
+    except Exception as e:
+        results = [StepResult(sequence=s, prediction="Unknown", error=str(e)) for s in sequences]
+    client.close()
     return results
 
 
