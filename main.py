@@ -256,7 +256,8 @@ def allertop_predict(req: SeqRequest):
 
     _log(f"AllerTOP: {len(req.sequences)} peptides")
 
-    sbm, sb, cookies, user_agent = _sb_launch_cloudflare(ALLERTOP_URL)
+    # Pass Cloudflare on VaxiJen first (same domain, reliable)
+    sbm, sb, cookies, user_agent = _sb_launch_cloudflare(VAXIJEN_FORM)
 
     try:
         _uname = f"neo_{uuid.uuid4().hex[:8]}"
@@ -266,14 +267,14 @@ def allertop_predict(req: SeqRequest):
         # Register
         _log(f"  Registering: {_uname}")
         try:
-            sb.open(f"https://www.ddg-pharmfac.net/allertop_v2/accounts/signup/")
-            time.sleep(3)
+            sb.open("https://www.ddg-pharmfac.net/allertop_v2/accounts/signup/")
+            time.sleep(5)
             sb.type("#id_username", _uname)
             sb.type("#id_email", _email)
             sb.type("#id_password1", _pw)
             sb.type("#id_password2", _pw)
             sb.click("button[type='submit'], input[type='submit']")
-            time.sleep(3)
+            time.sleep(5)
         except Exception as e:
             _log(f"  Register failed: {e}")
 
@@ -281,55 +282,66 @@ def allertop_predict(req: SeqRequest):
         _log(f"  Logging in...")
         try:
             sb.open("https://www.ddg-pharmfac.net/allertop_v2/accounts/login/?next=/allertop_v2/")
-            time.sleep(3)
+            time.sleep(5)
             sb.type("#id_username", _uname)
             sb.type("#id_password", _pw)
             sb.click("button[type='submit'], input[type='submit']")
-            time.sleep(3)
+            time.sleep(5)
         except Exception as e:
             _log(f"  Login failed: {e}")
 
-        # Get updated cookies from browser
-        cookies = {c["name"]: c["value"] for c in sb.get_cookies()}
-        user_agent = sb.execute_script("return navigator.userAgent")
+        # Navigate to AllerTOP
+        sb.open(ALLERTOP_URL)
+        time.sleep(5)
 
-        # httpx batch
-        results = _allertop_httpx_batch(req.sequences, cookies, user_agent)
+        # Submit each peptide via browser
+        results = []
+        for seq in req.sequences:
+            try:
+                sb.open(ALLERTOP_URL)
+                time.sleep(3)
+                try:
+                    sb.wait_for_element("textarea", timeout=10)
+                except Exception:
+                    pass
+                sb.execute_script("document.querySelector('textarea').value = ''")
+                sb.type("textarea", seq)
+                time.sleep(1)
+                sb.click("button[type='submit']")
+                time.sleep(10)
+
+                html = sb.get_page_source()
+                text = _strip_html(html)
+                for _ in range(10):
+                    if "Classification" in text and ("ALLERGEN" in text or "NON-ALLERGEN" in text):
+                        break
+                    time.sleep(3)
+                    html = sb.get_page_source()
+                    text = _strip_html(html)
+
+                pat = re.compile(r"Classification.*?:\s*(Probable\s+(?:NON-)?ALLERGEN)", re.DOTALL | re.IGNORECASE)
+                m = pat.search(text)
+                sim_pat = re.compile(r"Most similar protein:\s*(.+?)(?:\n|Classification)", re.DOTALL | re.IGNORECASE)
+                sim_m = sim_pat.search(text)
+                similar_protein = re.sub(r"\s+", " ", sim_m.group(1).strip()) if sim_m else None
+                if m:
+                    pred = m.group(1).strip()
+                    if "NON-ALLERGEN" in pred.upper():
+                        results.append(StepResult(sequence=seq, prediction="NON-ALLERGEN", similar_protein=similar_protein))
+                    else:
+                        results.append(StepResult(sequence=seq, prediction="ALLERGEN", similar_protein=similar_protein))
+                    _log(f"  {seq} -> {pred}")
+                else:
+                    results.append(StepResult(sequence=seq, prediction="Unknown", similar_protein=similar_protein))
+            except Exception as e:
+                _log(f"  {seq} -> Error: {e}")
+                results.append(StepResult(sequence=seq, prediction="Unknown", error=str(e)))
     finally:
         sbm.__exit__(None, None, None)
         _cleanup()
 
     return results
 
-
-def _allertop_httpx_batch(sequences, cookies, user_agent):
-    results = []
-    client = _sb_get_httpx_client(cookies, user_agent, referer=ALLERTOP_URL)
-    for seq in sequences:
-        try:
-            resp = client.post(ALLERTOP_URL, data={"protein": seq})
-            text = _strip_html(resp.text)
-            if "Cloudflare" in resp.text or "Just a moment" in resp.text:
-                results.append(StepResult(sequence=seq, prediction="Unknown", error="Cloudflare blocked"))
-                continue
-            pat = re.compile(r"Classification.*?:\s*(Probable\s+(?:NON-)?ALLERGEN)", re.DOTALL | re.IGNORECASE)
-            m = pat.search(text)
-            sim_pat = re.compile(r"Most similar protein:\s*(.+?)(?:\n|Classification)", re.DOTALL | re.IGNORECASE)
-            sim_m = sim_pat.search(text)
-            similar_protein = re.sub(r"\s+", " ", sim_m.group(1).strip()) if sim_m else None
-            if m:
-                pred = m.group(1).strip()
-                if "NON-ALLERGEN" in pred.upper():
-                    results.append(StepResult(sequence=seq, prediction="NON-ALLERGEN", similar_protein=similar_protein))
-                else:
-                    results.append(StepResult(sequence=seq, prediction="ALLERGEN", similar_protein=similar_protein))
-            else:
-                results.append(StepResult(sequence=seq, prediction="Unknown", similar_protein=similar_protein))
-        except Exception as e:
-            results.append(StepResult(sequence=seq, prediction="Unknown", error=str(e)))
-        time.sleep(1)
-    client.close()
-    return results
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
