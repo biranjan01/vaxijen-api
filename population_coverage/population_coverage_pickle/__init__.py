@@ -1,11 +1,9 @@
 import pickle
-from pkg_resources import resource_filename  # @UnresolvedImport
+import os
 
-package_name = "population_coverage_pickle"
-pickle_filename = "population_genotype_map.p"
-pickle_file_path = resource_filename(package_name, pickle_filename)
+_pickle_path = os.path.join(os.path.dirname(__file__), "population_genotype_map.p")
 
-with open(pickle_file_path, "rb") as pickle_file:
-    population_coverage = pickle.load(pickle_file)
-    country_ethnicity = pickle.load(pickle_file)
-    ethnicity = pickle.load(pickle_file)
+with open(_pickle_path, "rb") as _f:
+    population_coverage = pickle.load(_f)
+    country_ethnicity = pickle.load(_f)
+    ethnicity = pickle.load(_f)
