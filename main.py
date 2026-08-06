@@ -225,7 +225,7 @@ def vaxijen_predict(req: SeqRequest):
                         sb.wait_for_element("textarea", timeout=10)
                     except Exception:
                         pass
-                    sb.clear_text("textarea")
+                    sb.execute_script("document.querySelector('textarea').value = ''")
                     sb.type("textarea", seq)
                     try:
                         sb.select_option("select", label="Tumour")
@@ -311,7 +311,7 @@ def allertop_predict(req: SeqRequest):
                     results.append(StepResult(sequence=seq, prediction="Unknown", error="No textarea"))
                     continue
 
-                sb.clear_text("textarea")
+                sb.execute_script("document.querySelector('textarea').value = ''")
                 sb.type("textarea", seq)
                 time.sleep(1)
                 sb.click("button[type='submit']")
@@ -788,8 +788,11 @@ async def population_coverage(req: PopCoverageRequest):
 
     try:
         script = os.path.join(os.path.dirname(__file__), "population_coverage", "calculate_population_coverage.py")
+        env = os.environ.copy()
+        popcov_dir = os.path.join(os.path.dirname(__file__), "population_coverage")
+        env["PYTHONPATH"] = popcov_dir + ":" + env.get("PYTHONPATH", "")
         cmd = ["python3", script, "-p", ",".join(req.population), "-c", req.mhc_class, "-f", input_file, "--plot", output_dir]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=popcov_dir)
 
         if proc.returncode != 0 and not proc.stdout:
             return {"error": f"Failed: {proc.stderr[:500]}"}
