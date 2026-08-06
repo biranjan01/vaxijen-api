@@ -92,7 +92,7 @@ def _strip_html(html):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _sb_launch_cloudflare(url, wait_for="textarea", timeout=60):
-    """Launch SeleniumBase, pass Cloudflare, return (sb, page_cookies_dict, user_agent)."""
+    """Launch SeleniumBase, pass Cloudflare, return (sb_manager, sb, page_cookies_dict, user_agent)."""
     from seleniumbase import SB
 
     _log(f"  [browser] Launching Chrome for {url}...")
@@ -107,7 +107,6 @@ def _sb_launch_cloudflare(url, wait_for="textarea", timeout=60):
             if "moment" not in title.lower() and title:
                 _log(f"  [browser] Cloudflare passed in {i*2}s")
                 break
-
         time.sleep(2)
         cookies = {c["name"]: c["value"] for c in sb.get_cookies()}
         user_agent = sb.execute_script("return navigator.userAgent")
@@ -116,6 +115,43 @@ def _sb_launch_cloudflare(url, wait_for="textarea", timeout=60):
     except Exception:
         sb_manager.__exit__(None, None, None)
         raise
+
+
+def _sb_launch_cloudflare_headed(url, wait_for="textarea", timeout=90):
+    """Launch SeleniumBase in headed mode (Xvfb) for sites where headless2 fails CF."""
+    from seleniumbase import SB
+    os.environ["DISPLAY"] = ":99"
+
+    _log(f"  [browser] Launching Chrome (headed) for {url}...")
+    t0 = time.time()
+    sb_manager = SB(uc=True, headless=False)
+    sb = sb_manager.__enter__()
+    try:
+        sb.activate_cdp_mode(url)
+        for i in range(timeout // 2):
+            time.sleep(2)
+            title = sb.get_title()
+            if "moment" not in title.lower() and title:
+                _log(f"  [browser] Cloudflare passed in {i*2}s")
+                break
+        time.sleep(2)
+        cookies = {c["name"]: c["value"] for c in sb.get_cookies()}
+        user_agent = sb.execute_script("return navigator.userAgent")
+        _log(f"  [browser] Got {len(cookies)} cookies in {time.time()-t0:.1f}s")
+        return sb_manager, sb, cookies, user_agent
+    except Exception:
+        sb_manager.__exit__(None, None, None)
+        raise
+
+
+def _sb_wait_cloudflare(sb, timeout=30):
+    """Wait for Cloudflare challenge to clear on current page."""
+    for i in range(timeout // 2):
+        time.sleep(2)
+        title = sb.get_title()
+        if "moment" not in title.lower() and title:
+            return True
+    return False
 
 
 def _sb_get_httpx_client(cookies, user_agent, referer=VAXIJEN_FORM):
@@ -256,49 +292,55 @@ def allertop_predict(req: SeqRequest):
 
     _log(f"AllerTOP: {len(req.sequences)} peptides")
 
-    # Pass Cloudflare on VaxiJen first (same domain, reliable)
-    sbm, sb, cookies, user_agent = _sb_launch_cloudflare(VAXIJEN_FORM)
+    # Pass Cloudflare on AllerTOP — headless2 fails CF, must use headed mode
+    sbm, sb, cookies, user_agent = _sb_launch_cloudflare_headed(ALLERTOP_URL)
 
     try:
         _uname = f"neo_{uuid.uuid4().hex[:8]}"
         _pw = "N30Pep!2024xZ"
         _email = f"{_uname}@neopeptide.app"
 
-        # Register
+        # Register via browser
         _log(f"  Registering: {_uname}")
         try:
             sb.open("https://www.ddg-pharmfac.net/allertop_v2/accounts/signup/")
-            time.sleep(5)
+            _sb_wait_cloudflare(sb, timeout=30)
+            time.sleep(3)
             sb.type("#id_username", _uname)
             sb.type("#id_email", _email)
             sb.type("#id_password1", _pw)
             sb.type("#id_password2", _pw)
             sb.click("button[type='submit'], input[type='submit']")
-            time.sleep(5)
+            _sb_wait_cloudflare(sb, timeout=30)
+            time.sleep(3)
         except Exception as e:
             _log(f"  Register failed: {e}")
 
-        # Login
+        # Login via browser
         _log(f"  Logging in...")
         try:
             sb.open("https://www.ddg-pharmfac.net/allertop_v2/accounts/login/?next=/allertop_v2/")
-            time.sleep(5)
+            _sb_wait_cloudflare(sb, timeout=30)
+            time.sleep(3)
             sb.type("#id_username", _uname)
             sb.type("#id_password", _pw)
             sb.click("button[type='submit'], input[type='submit']")
-            time.sleep(5)
+            _sb_wait_cloudflare(sb, timeout=30)
+            time.sleep(3)
         except Exception as e:
             _log(f"  Login failed: {e}")
 
         # Navigate to AllerTOP
         sb.open(ALLERTOP_URL)
-        time.sleep(5)
+        _sb_wait_cloudflare(sb, timeout=30)
+        time.sleep(3)
 
         # Submit each peptide via browser
         results = []
         for seq in req.sequences:
             try:
                 sb.open(ALLERTOP_URL)
+                _sb_wait_cloudflare(sb, timeout=30)
                 time.sleep(3)
                 try:
                     sb.wait_for_element("textarea", timeout=10)
@@ -342,6 +384,36 @@ def allertop_predict(req: SeqRequest):
 
     return results
 
+
+def _allertop_httpx_batch(sequences, cookies, user_agent):
+    """Submit peptides to AllerTOP via httpx with session cookies."""
+    results = []
+    client = _sb_get_httpx_client(cookies, user_agent, referer=ALLERTOP_URL)
+    for seq in sequences:
+        try:
+            resp = client.post(ALLERTOP_URL, data={"protein": seq})
+            text = _strip_html(resp.text)
+            if "Cloudflare" in resp.text or "Just a moment" in resp.text:
+                results.append(StepResult(sequence=seq, prediction="Unknown", error="Cloudflare blocked"))
+                continue
+            pat = re.compile(r"Classification.*?:\s*(Probable\s+(?:NON-)?ALLERGEN)", re.DOTALL | re.IGNORECASE)
+            m = pat.search(text)
+            sim_pat = re.compile(r"Most similar protein:\s*(.+?)(?:\n|Classification)", re.DOTALL | re.IGNORECASE)
+            sim_m = sim_pat.search(text)
+            similar_protein = re.sub(r"\s+", " ", sim_m.group(1).strip()) if sim_m else None
+            if m:
+                pred = m.group(1).strip()
+                if "NON-ALLERGEN" in pred.upper():
+                    results.append(StepResult(sequence=seq, prediction="NON-ALLERGEN", similar_protein=similar_protein))
+                else:
+                    results.append(StepResult(sequence=seq, prediction="ALLERGEN", similar_protein=similar_protein))
+            else:
+                results.append(StepResult(sequence=seq, prediction="Unknown", similar_protein=similar_protein))
+        except Exception as e:
+            results.append(StepResult(sequence=seq, prediction="Unknown", error=str(e)))
+        time.sleep(1)
+    client.close()
+    return results
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

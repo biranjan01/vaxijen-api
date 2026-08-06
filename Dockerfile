@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     chromium-driver \
     xvfb \
+    xdotool \
     procps curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -20,4 +21,6 @@ COPY population_coverage/ population_coverage/
 
 EXPOSE 10000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
+ENV DISPLAY=:99
+
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 & sleep 2 && uvicorn main:app --host 0.0.0.0 --port 10000"]
