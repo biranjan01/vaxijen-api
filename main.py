@@ -292,8 +292,8 @@ def allertop_predict(req: SeqRequest):
 
     _log(f"AllerTOP: {len(req.sequences)} peptides")
 
-    # Pass Cloudflare on AllerTOP — headless2 fails CF, must use headed mode
-    sbm, sb, cookies, user_agent = _sb_launch_cloudflare_headed(ALLERTOP_URL)
+    # Pass Cloudflare on AllerTOP — use headless2
+    sbm, sb, cookies, user_agent = _sb_launch_cloudflare(ALLERTOP_URL)
 
     try:
         _uname = f"neo_{uuid.uuid4().hex[:8]}"
