@@ -1,4 +1,4 @@
 fastapi>=0.104.0
 uvicorn>=0.24.0
-camoufox>=4.0.0
+camoufox>=0.5.0
 pydantic>=2.0.0
