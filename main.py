@@ -96,8 +96,8 @@ def _sb_launch_cloudflare(url, wait_for="textarea", timeout=60):
 
     _log(f"  [browser] Launching Chrome for {url}...")
     t0 = time.time()
-    sb = SB(uc=True, headless2=True)
-    sb.__enter__()
+    sb_manager = SB(uc=True, headless2=True)
+    sb = sb_manager.__enter__()
     try:
         sb.activate_cdp_mode(url)
         for i in range(30):
@@ -111,9 +111,9 @@ def _sb_launch_cloudflare(url, wait_for="textarea", timeout=60):
         cookies = {c["name"]: c["value"] for c in sb.get_cookies()}
         user_agent = sb.execute_script("return navigator.userAgent")
         _log(f"  [browser] Got {len(cookies)} cookies in {time.time()-t0:.1f}s")
-        return sb, cookies, user_agent
+        return sb_manager, sb, cookies, user_agent
     except Exception:
-        sb.__exit__(None, None, None)
+        sb_manager.__exit__(None, None, None)
         raise
 
 
@@ -204,13 +204,13 @@ def _vaxijen_httpx_batch(sequences, cookies, user_agent):
 
 
 @app.post("/api/vaxijen", response_model=list[StepResult])
-async def vaxijen_predict(req: SeqRequest):
+def vaxijen_predict(req: SeqRequest):
     if req.dummy:
         return _dummy_vaxijen(req.sequences)
 
     _log(f"VaxiJen: {len(req.sequences)} peptides")
 
-    sb, cookies, user_agent = _sb_launch_cloudflare(VAXIJEN_FORM)
+    sbm, sb, cookies, user_agent = _sb_launch_cloudflare(VAXIJEN_FORM)
 
     try:
         results = _vaxijen_httpx_batch(req.sequences, cookies, user_agent)
@@ -238,7 +238,7 @@ async def vaxijen_predict(req: SeqRequest):
                     idx = next(i for i, r in enumerate(results) if r and r.sequence == seq and r.prediction is None)
                     results[idx] = StepResult(sequence=seq, score=score, prediction=pred)
     finally:
-        sb.__exit__(None, None, None)
+        sbm.__exit__(None, None, None)
         _cleanup()
 
     return [r for r in results if r is not None]
@@ -249,14 +249,14 @@ async def vaxijen_predict(req: SeqRequest):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.post("/api/allertop", response_model=list[StepResult])
-async def allertop_predict(req: SeqRequest):
+def allertop_predict(req: SeqRequest):
     if req.dummy:
         return _dummy_allertop(req.sequences)
 
     _log(f"AllerTOP: {len(req.sequences)} peptides")
     results = []
 
-    sb, cookies, user_agent = _sb_launch_cloudflare(ALLERTOP_URL)
+    sbm, sb, cookies, user_agent = _sb_launch_cloudflare(ALLERTOP_URL)
 
     try:
         _uname = f"neo_{uuid.uuid4().hex[:8]}"
@@ -348,7 +348,7 @@ async def allertop_predict(req: SeqRequest):
                 _log(f"  {seq} → Error: {e}")
                 results.append(StepResult(sequence=seq, prediction="Unknown", error=str(e)))
     finally:
-        sb.__exit__(None, None, None)
+        sbm.__exit__(None, None, None)
         _cleanup()
 
     return results
@@ -359,7 +359,7 @@ async def allertop_predict(req: SeqRequest):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.post("/api/immunogenicity", response_model=list[StepResult])
-async def immunogenicity_predict(req: SeqRequest):
+def immunogenicity_predict(req: SeqRequest):
     if req.dummy:
         return _dummy_immunogenicity(req.sequences)
 
@@ -369,7 +369,7 @@ async def immunogenicity_predict(req: SeqRequest):
     _log(f"VaxiJen 3.0 Immunogenicity: {n} peptides in {len(batches)} batches of ≤{BATCH}")
     results = []
 
-    sb, cookies, user_agent = _sb_launch_cloudflare(VAXIJEN3_URL)
+    sbm, sb, cookies, user_agent = _sb_launch_cloudflare(VAXIJEN3_URL)
 
     try:
         _uname = f"neo_{uuid.uuid4().hex[:8]}"
@@ -472,7 +472,7 @@ async def immunogenicity_predict(req: SeqRequest):
             if seq not in found_seqs:
                 results.append(StepResult(sequence=seq, prediction="Error", error=str(e)))
     finally:
-        sb.__exit__(None, None, None)
+        sbm.__exit__(None, None, None)
         _cleanup()
 
     return results
@@ -483,14 +483,14 @@ async def immunogenicity_predict(req: SeqRequest):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.post("/api/toxinpred", response_model=list[StepResult])
-async def toxinpred_predict(req: SeqRequest):
+def toxinpred_predict(req: SeqRequest):
     if req.dummy:
         return _dummy_toxinpred(req.sequences)
 
     _log(f"ToxinPred: {len(req.sequences)} peptides")
     results = []
 
-    sb, cookies, user_agent = _sb_launch_cloudflare(TOXINPRED_URL)
+    sbm, sb, cookies, user_agent = _sb_launch_cloudflare(TOXINPRED_URL)
 
     try:
         fasta = "\n".join(f">seq{i}\n{s}" for i, s in enumerate(req.sequences))
@@ -537,7 +537,7 @@ async def toxinpred_predict(req: SeqRequest):
             else:
                 results.append(StepResult(sequence=seq, error="not found"))
     finally:
-        sb.__exit__(None, None, None)
+        sbm.__exit__(None, None, None)
         _cleanup()
 
     return results
