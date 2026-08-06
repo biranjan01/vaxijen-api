@@ -4,4 +4,4 @@ services:
     runtime: docker
     envVars:
       - key: PYTHON_VERSION
-        value: "3.12"
+        value: "3.11"
