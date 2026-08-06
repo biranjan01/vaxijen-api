@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: camoufox-service
+    runtime: docker
+    dockerfilePath: Dockerfile
+    dockerContext: .
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    plan: free
+    healthCheckPath: /health
