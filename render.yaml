@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: vaxijen-api
+    runtime: docker
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"

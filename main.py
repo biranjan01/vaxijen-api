@@ -1,19 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
-from typing import Optional
 import httpx
 import re
 import json
 import time
 import os
 import threading
+import uvicorn
 
-app = FastAPI(
-    title="VaxiJen API",
-    description="Protein vaccine candidate prediction using VaxiJen",
-    version="1.0.0",
-)
+app = FastAPI(title="VaxiJen API")
 
 VAXIJEN_URL = "https://www.ddg-pharmfac.net/vaxijen/VaxiJen/VaxiJen.html"
 VAXIJEN_SCRIPT = "https://www.ddg-pharmfac.net/vaxijen/scripts/VaxiJen_scripts/VaxiJen3.pl"
@@ -26,27 +22,13 @@ _lock = threading.Lock()
 
 
 class PredictRequest(BaseModel):
-    sequence: str = Field(..., min_length=1, description="Protein sequence")
-    organism: str = Field("bacteria", description="Target organism")
-    threshold: float = Field(0.5, ge=0, le=1, description="Prediction threshold")
-
-
-class PredictResponse(BaseModel):
-    prediction: str
-    score: float
-    organism: str
+    sequence: str = Field(..., min_length=1)
+    organism: str = Field("bacteria")
+    threshold: float = Field(0.5, ge=0, le=1)
 
 
 class BatchRequest(BaseModel):
-    sequences: list[dict] = Field(
-        ...,
-        description="List of {sequence, organism, threshold?} objects",
-    )
-
-
-class BatchResponse(BaseModel):
-    results: list[dict]
-    total_time: float
+    sequences: list[dict]
 
 
 def _load_cookies():
@@ -65,7 +47,6 @@ def _save_cookies(cookies, user_agent):
 
 def _launch_browser():
     from seleniumbase import SB
-
     print("[browser] Launching Chrome...")
     t0 = time.time()
     with SB(uc=True, headless2=True) as sb:
@@ -73,16 +54,13 @@ def _launch_browser():
         for i in range(30):
             time.sleep(2)
             title = sb.get_title()
-            print(f"[browser] [{i*2}s] Title: {title}")
             if "moment" not in title.lower() and title:
-                print(f"[browser] Cloudflare resolved in {i*2}s")
                 break
         time.sleep(2)
         cookies = {}
         for c in sb.get_cookies():
             cookies[c["name"]] = c["value"]
         user_agent = sb.execute_script("return navigator.userAgent")
-    print(f"[browser] Got cookies in {time.time()-t0:.1f}s")
     _save_cookies(cookies, user_agent)
     return cookies, user_agent
 
@@ -93,13 +71,9 @@ def _get_client(cookies, user_agent):
         _client.close()
     cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
     _client = httpx.Client(
-        timeout=60,
-        follow_redirects=True,
+        timeout=60, follow_redirects=True,
         headers={
-            "User-Agent": user_agent,
-            "Cookie": cookie_str,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
+            "User-Agent": user_agent, "Cookie": cookie_str,
             "Content-Type": "application/x-www-form-urlencoded",
             "Origin": "https://www.ddg-pharmfac.net",
             "Referer": VAXIJEN_URL,
@@ -109,40 +83,31 @@ def _get_client(cookies, user_agent):
 
 
 def _httpx_predict(client, sequence, organism, threshold):
-    resp = client.post(
-        VAXIJEN_SCRIPT,
-        data={
-            "seq": sequence,
-            "Target": organism,
-            "threshold": str(threshold),
-            "submit": "Submit",
-        },
-    )
+    resp = client.post(VAXIJEN_SCRIPT, data={
+        "seq": sequence, "Target": organism,
+        "threshold": str(threshold), "submit": "Submit",
+    })
     text = re.sub(r"<[^>]+>", " ", resp.text)
     if "Cloudflare" in resp.text or "Just a moment" in resp.text:
         return None
     m = re.search(
         r"Overall Prediction for the Protective Antigen\s*=\s*(-?[\d.]+)\s*\(.*?(?:Probable\s*)?(ANTIGEN|NON-ANTIGEN)",
-        text,
-        re.IGNORECASE,
+        text, re.IGNORECASE,
     )
     if m:
         return {
             "prediction": "ANTIGEN" if "NON" not in m.group(2).upper() else "NON-ANTIGEN",
-            "score": float(m.group(1)),
-            "organism": organism,
+            "score": float(m.group(1)), "organism": organism,
         }
     return None
 
 
 def _predict(sequence, organism="bacteria", threshold=0.5):
     global _last_request
-
     with _lock:
         elapsed = time.time() - _last_request
         if elapsed < 1:
             time.sleep(1 - elapsed)
-
         cookies, user_agent = _load_cookies()
         if cookies:
             client = _get_client(cookies, user_agent)
@@ -150,35 +115,28 @@ def _predict(sequence, organism="bacteria", threshold=0.5):
             _last_request = time.time()
             if result:
                 return result
-
         cookies, user_agent = _launch_browser()
         client = _get_client(cookies, user_agent)
         result = _httpx_predict(client, sequence, organism, threshold)
         _last_request = time.time()
         if result:
             return result
-
         return {"error": "Could not parse result"}
 
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return """<!DOCTYPE html>
-<html>
-<head><title>VaxiJen API</title></head>
-<body>
+    return """<html><body>
 <h1>VaxiJen API</h1>
-<p>Protein vaccine candidate prediction</p>
 <ul>
-<li><a href="/docs">Swagger UI (interactive)</a></li>
-<li><a href="/redoc">ReDoc (documentation)</a></li>
+<li><a href="/docs">Swagger UI (interactive docs)</a></li>
+<li><a href="/redoc">ReDoc</a></li>
 </ul>
-<h3>Example</h3>
-<pre>curl -X POST http://localhost:8000/predict \\
-  -H "Content-Type: application/json" \\
-  -d '{"sequence": "GAVLIPFYW", "organism": "bacteria"}'</pre>
-</body>
-</html>"""
+<h3>Usage from Next.js</h3>
+<pre>fetch("/predict", {method:"POST", headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({sequence:"GAVLIPFYW", organism:"bacteria"})
+}).then(r=>r.json())</pre>
+</body></html>"""
 
 
 @app.get("/targets")
@@ -186,8 +144,8 @@ def get_targets():
     return {"targets": TARGETS}
 
 
-@app.post("/predict", response_model=PredictResponse)
-def predict(req: PredictRequest):
+@app.post("/predict")
+def predict_endpoint(req: PredictRequest):
     if req.organism not in TARGETS:
         raise HTTPException(400, f"Invalid organism. Choose from: {TARGETS}")
     result = _predict(req.sequence, req.organism, req.threshold)
@@ -196,7 +154,7 @@ def predict(req: PredictRequest):
     return result
 
 
-@app.post("/predict/batch", response_model=BatchResponse)
+@app.post("/predict/batch")
 def predict_batch(req: BatchRequest):
     t0 = time.time()
     results = []
@@ -207,6 +165,10 @@ def predict_batch(req: BatchRequest):
         if org not in TARGETS:
             results.append({"error": f"Invalid organism: {org}"})
             continue
-        result = _predict(seq, org, thr)
-        results.append(result)
-    return BatchResponse(results=results, total_time=round(time.time() - t0, 2))
+        results.append(_predict(seq, org, thr))
+    return {"results": results, "total_time": round(time.time() - t0, 2)}
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
