@@ -31,6 +31,7 @@ VAXIJEN_CGI = "https://www.ddg-pharmfac.net/vaxijen/scripts/VaxiJen_scripts/Vaxi
 VAXIJEN3_URL = "https://www.ddg-pharmfac.net/vaxijen3/home/"
 ALLERTOP_URL = "https://www.ddg-pharmfac.net/allertop_v2/"
 TOXINPRED_URL = "https://webs.iiitd.edu.in/raghava/toxinpred3/prediction.php"
+TOXINPRED_ACTION = "https://webs.iiitd.edu.in/raghava/toxinpred3/prediction_action.php"
 
 
 class SeqRequest(BaseModel):
@@ -465,42 +466,39 @@ def toxinpred_predict(req: SeqRequest):
         return _dummy_toxinpred(req.sequences)
 
     _log(f"ToxinPred: {len(req.sequences)} peptides")
-
-    sbm, sb, cookies, user_agent = _sb_launch_cloudflare(TOXINPRED_URL)
-
-    try:
-        cookies = {c["name"]: c["value"] for c in sb.get_cookies()}
-        user_agent = sb.execute_script("return navigator.userAgent")
-
-        results = _toxinpred_httpx_batch(req.sequences, cookies, user_agent)
-    finally:
-        sbm.__exit__(None, None, None)
-        _cleanup()
-
-    return results
+    return _toxinpred_httpx_batch(req.sequences)
 
 
-def _toxinpred_httpx_batch(sequences, cookies, user_agent):
+def _toxinpred_httpx_batch(sequences):
     results = []
-    client = _sb_get_httpx_client(cookies, user_agent, referer=TOXINPRED_URL)
     fasta = "\n".join(f">seq{i}\n{s}" for i, s in enumerate(sequences))
+    client = httpx.Client(timeout=60, follow_redirects=True, headers={
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Content-Type": "application/x-www-form-urlencoded",
+    })
     try:
-        resp = client.post(TOXINPRED_URL, data={"fasta": fasta, "method": "hybrid", "submit": "Submit"})
-        text = _strip_html(resp.text)
-        if "Cloudflare" in resp.text or "Just a moment" in resp.text:
-            return [StepResult(sequence=s, prediction="Unknown", error="Cloudflare blocked") for s in sequences]
-        for seq in sequences:
-            if seq in text:
-                idx = text.index(seq)
-                nearby = text[idx:idx+300]
-                if "non-toxin" in nearby.lower():
-                    results.append(StepResult(sequence=seq, prediction="Non-Toxin"))
-                elif "toxin" in nearby.lower():
-                    results.append(StepResult(sequence=seq, prediction="Toxin"))
+        resp = client.post(TOXINPRED_ACTION, data={
+            "seq": fasta, "MAX_FILE_SIZE": "", "terminus": "1", "th": "0.38", "email": "", "submit": "Submit",
+        })
+        redirect_match = re.search(r"content=.0;url=(disp1\.php\?ran=\d+)", resp.text)
+        if redirect_match:
+            result_url = TOXINPRED_URL.rsplit("/", 1)[0] + "/" + redirect_match.group(1)
+            resp2 = client.get(result_url)
+            text = _strip_html(resp2.text)
+            for seq in sequences:
+                if seq in text:
+                    idx = text.index(seq)
+                    nearby = text[idx:idx+300]
+                    if "non-toxin" in nearby.lower():
+                        results.append(StepResult(sequence=seq, prediction="Non-Toxin"))
+                    elif "toxin" in nearby.lower():
+                        results.append(StepResult(sequence=seq, prediction="Toxin"))
+                    else:
+                        results.append(StepResult(sequence=seq, prediction="Unknown"))
                 else:
                     results.append(StepResult(sequence=seq, prediction="Unknown"))
-            else:
-                results.append(StepResult(sequence=seq, prediction="Unknown"))
+        else:
+            results = [StepResult(sequence=s, prediction="Unknown", error="No redirect") for s in sequences]
     except Exception as e:
         results = [StepResult(sequence=s, prediction="Unknown", error=str(e)) for s in sequences]
     client.close()
