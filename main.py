@@ -47,9 +47,9 @@ def _save_cookies(cookies, user_agent):
 
 def _launch_browser():
     from seleniumbase import SB
-    print("[browser] Launching Chrome...")
+    print("[browser] Launching Chromium...")
     t0 = time.time()
-    with SB(uc=True, headless2=True) as sb:
+    with SB(uc=True, headless2=True, chromium_arg="--no-sandbox,--disable-dev-shm-usage") as sb:
         sb.activate_cdp_mode(VAXIJEN_URL)
         for i in range(30):
             time.sleep(2)
