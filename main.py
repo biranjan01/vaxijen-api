@@ -873,6 +873,36 @@ async def population_coverage(req: PopCoverageRequest):
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# GCE Camoufox Proxy — forwards requests to GCE (HTTPS frontend → HTTPS Render → HTTP GCE)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+GCE_CAMOUFOX_URL = os.environ.get("GCE_CAMOUFOX_URL", "http://34.148.133.234:8080")
+
+
+class GCEProxyRequest(BaseModel):
+    endpoint: str
+    sequences: list[str]
+    dummy: bool = False
+
+
+@app.post("/api/gce-proxy")
+async def gce_proxy(req: GCEProxyRequest):
+    """Proxy requests to GCE Camoufox (no timeout, no mixed content)."""
+    _log(f"GCE Proxy: {req.endpoint} ({len(req.sequences)} sequences)")
+    try:
+        r = _requests.post(
+            f"{GCE_CAMOUFOX_URL}{req.endpoint}",
+            json={"sequences": req.sequences, "dummy": req.dummy},
+            timeout=600,
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        _log(f"GCE Proxy error: {e}")
+        return JSONResponse(status_code=502, content={"error": f"GCE proxy failed: {str(e)}"})
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
